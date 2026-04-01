@@ -80,15 +80,7 @@ const isLeftCalibrated = (config: BridgeConfig): boolean => {
 
 const isRightCalibrated = (config: BridgeConfig): boolean => {
   const right = config.calibration.codex;
-  return Boolean(
-    right.inputAnchor &&
-      right.paneActivationPoint &&
-      right.replyAreaActivationPoint &&
-      right.hoverBandAnchor &&
-      right.copyCandidatePoints.length > 0 &&
-      right.stableRoi &&
-      (right.bottomAnchor || right.bottomDetectionRoi)
-  );
+  return Boolean(right.inputAnchor);
 };
 
 const migrateLegacyConfig = (config: BridgeConfig, rawParsed: unknown): BridgeConfig => {
@@ -124,8 +116,9 @@ const migrateLegacyConfig = (config: BridgeConfig, rawParsed: unknown): BridgeCo
   }
 
   const parsedCalibration = isObject(parsed.calibration) ? parsed.calibration : {};
-  const parsedCodex = isObject(parsedCalibration.codex) ? parsedCalibration.codex : {};
+  const parsedCalibrationCodex = isObject(parsedCalibration.codex) ? parsedCalibration.codex : {};
   const parsedChatGPT = isObject(parsedCalibration.chatgpt) ? parsedCalibration.chatgpt : {};
+  const parsedCodex = isObject(parsed.codex) ? parsed.codex : {};
 
   if (!config.calibration.chatgpt.latestReplyStableRoi && config.calibration.chatgpt.responseRoi) {
     config.calibration.chatgpt.latestReplyStableRoi = config.calibration.chatgpt.responseRoi;
@@ -135,44 +128,53 @@ const migrateLegacyConfig = (config: BridgeConfig, rawParsed: unknown): BridgeCo
     config.calibration.codex.stableRoi = config.calibration.codex.responseRoi;
   }
 
-  const legacyCopyAnchor = asPoint(parsedCodex.copyCandidateAnchor);
-  if (legacyCopyAnchor && config.calibration.codex.copyCandidatePoints.length === 0) {
-    const offsetSource = Array.isArray(parsedCodex.copyCandidateOffsets)
-      ? parsedCodex.copyCandidateOffsets
-      : [
-          { x: -32, y: 0 },
-          { x: 0, y: 0 },
-          { x: 32, y: 0 }
-        ];
-
-    const offsets = offsetSource
-      .map((entry) => asPoint(entry))
-      .filter((entry): entry is Point => Boolean(entry));
-
-    config.calibration.codex.copyCandidatePoints = offsets.map((offset) => ({
-      x: Math.round(legacyCopyAnchor.x + offset.x),
-      y: Math.round(legacyCopyAnchor.y + offset.y)
-    }));
-  }
-
-  if (!config.calibration.codex.paneActivationPoint) {
-    const fallback = asPoint(parsedCodex.paneActivationPoint) ?? config.calibration.codex.inputAnchor;
-    if (fallback) {
-      config.calibration.codex.paneActivationPoint = fallback;
+  if (!config.calibration.codex.inputAnchor) {
+    const legacyInputAnchor = asPoint(parsedCalibrationCodex.inputAnchor);
+    if (legacyInputAnchor) {
+      config.calibration.codex.inputAnchor = legacyInputAnchor;
     }
   }
 
-  if (!config.calibration.codex.replyAreaActivationPoint) {
-    const fallback = asPoint(parsedCodex.replyAreaActivationPoint) ?? config.calibration.codex.hoverBandAnchor;
-    if (fallback) {
-      config.calibration.codex.replyAreaActivationPoint = fallback;
+  if (!config.calibration.codex.stableRoi) {
+    const legacyStableRoi = asRect(parsedCalibrationCodex.stableRoi);
+    if (legacyStableRoi) {
+      config.calibration.codex.stableRoi = legacyStableRoi;
+      config.calibration.codex.responseRoi = legacyStableRoi;
     }
   }
 
-  if (!config.calibration.codex.bottomAnchor) {
-    const legacyBottom = asPoint(parsedCodex.bottomAnchor);
-    if (legacyBottom) {
-      config.calibration.codex.bottomAnchor = legacyBottom;
+  if (!config.codex.responseBodyActivationRatio) {
+    config.codex.responseBodyActivationRatio = {
+      x: DEFAULT_CONFIG.codex.responseBodyActivationRatio.x,
+      y: DEFAULT_CONFIG.codex.responseBodyActivationRatio.y
+    };
+  }
+
+  if (isObject(parsedCodex.responseBodyActivationRatio)) {
+    const x = asNumber(parsedCodex.responseBodyActivationRatio.x);
+    const y = asNumber(parsedCodex.responseBodyActivationRatio.y);
+    if (x !== null && y !== null) {
+      config.codex.responseBodyActivationRatio = { x, y };
+    }
+  }
+
+  if (isObject(parsedCodex.responseBodyRoiRatio)) {
+    const x = asNumber(parsedCodex.responseBodyRoiRatio.x);
+    const y = asNumber(parsedCodex.responseBodyRoiRatio.y);
+    const width = asNumber(parsedCodex.responseBodyRoiRatio.width);
+    const height = asNumber(parsedCodex.responseBodyRoiRatio.height);
+    if (x !== null && y !== null && width !== null && height !== null) {
+      config.codex.responseBodyRoiRatio = { x, y, width, height };
+    }
+  }
+
+  if (isObject(parsedCodex.followUpInputRoiRatio)) {
+    const x = asNumber(parsedCodex.followUpInputRoiRatio.x);
+    const y = asNumber(parsedCodex.followUpInputRoiRatio.y);
+    const width = asNumber(parsedCodex.followUpInputRoiRatio.width);
+    const height = asNumber(parsedCodex.followUpInputRoiRatio.height);
+    if (x !== null && y !== null && width !== null && height !== null) {
+      config.codex.followUpInputRoiRatio = { x, y, width, height };
     }
   }
 
@@ -184,9 +186,9 @@ const migrateLegacyConfig = (config: BridgeConfig, rawParsed: unknown): BridgeCo
   }
 
   config.calibration.leftVersion = 2;
-  config.calibration.rightVersion = 2;
+  config.calibration.rightVersion = 3;
   config.calibration.chatgpt.version = 2;
-  config.calibration.codex.version = 2;
+  config.calibration.codex.version = 3;
   config.calibration.calibrated = isLeftCalibrated(config) && isRightCalibrated(config);
 
   return config;

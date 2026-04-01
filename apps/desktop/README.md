@@ -33,9 +33,10 @@ npm run diag -- print-calibration
 npm run diag -- check-permissions
 npm run diag -- left-send "diag message"
 npm run diag -- left-copy
-npm run diag -- right-pane-activation
-npm run diag -- right-hover-reveal
-npm run diag -- right-copy
+npm run diag -- right-activate-body
+npm run diag -- right-select-all
+npm run diag -- right-copy-full-transcript
+npm run diag -- right-extract-latest "optional last prompt"
 npm run diag -- round-gpt-to-codex
 npm run diag -- round-codex-to-gpt
 ```
@@ -44,4 +45,5 @@ npm run diag -- round-codex-to-gpt
 
 - V0 仅面向当前机器固定布局。
 - 不使用 OCR 作为主路径。
+- 左侧 ChatGPT 继续走锚点校准；右侧 Codex 主路径改为 `select-all-copy-extract`，通过 VSCode 窗口比例推导正文区域。
 - 坐标通过首次校准写入本地配置，不在代码中硬编码绝对坐标。

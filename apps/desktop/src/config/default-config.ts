@@ -1,7 +1,7 @@
 import { BridgeConfig } from "../types/config";
 
 export const DEFAULT_CONFIG: BridgeConfig = {
-  version: 2,
+  version: 3,
   hotkeys: {
     startResume: "Command+Option+Control+S",
     stop: "Command+Option+Control+X",
@@ -40,10 +40,31 @@ export const DEFAULT_CONFIG: BridgeConfig = {
     roiPixelDiffThreshold: 0.012,
     changeDeltaThreshold: 0.028
   },
+  codex: {
+    responseBodyActivationRatio: {
+      x: 0.74,
+      y: 0.44
+    },
+    responseBodyRoiRatio: {
+      x: 0.5,
+      y: 0.1,
+      width: 0.48,
+      height: 0.66
+    },
+    followUpInputRoiRatio: {
+      x: 0.5,
+      y: 0.78,
+      width: 0.48,
+      height: 0.2
+    },
+    promptFingerprintChars: 96,
+    maxTranscriptChars: 140_000,
+    minExtractedReplyLength: 20
+  },
   calibration: {
     calibrated: false,
     leftVersion: 2,
-    rightVersion: 2,
+    rightVersion: 3,
     chatgpt: {
       version: 2,
       inputAnchor: null,
@@ -60,23 +81,10 @@ export const DEFAULT_CONFIG: BridgeConfig = {
       minSendSignals: 2
     },
     codex: {
-      version: 2,
+      version: 3,
       inputAnchor: null,
-      paneActivationPoint: null,
-      replyAreaActivationPoint: null,
-      hoverBandAnchor: null,
-      copyCandidatePoints: [],
       stableRoi: null,
       responseRoi: null,
-      bottomAnchor: null,
-      bottomDetectionRoi: null,
-      hoverOffsets: [
-        { x: -180, y: 0 },
-        { x: -90, y: 0 },
-        { x: 0, y: 0 },
-        { x: 90, y: 0 },
-        { x: 180, y: 0 }
-      ],
       minSendSignals: 2
     }
   }

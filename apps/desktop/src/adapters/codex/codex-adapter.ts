@@ -1,5 +1,7 @@
+import { parseLatestCodexReply } from "./codex-transcript-parser";
+import { ConversationAdapter } from "../conversation-adapter";
 import { BridgeConfig } from "../../types/config";
-import { Rect, Point, addPoint } from "../../types/geometry";
+import { Rect, Point, clampRect } from "../../types/geometry";
 import { STEP_CODES, StepError } from "../../types/step-codes";
 import { ClipboardService } from "../../services/clipboard/clipboard-service";
 import { Logger } from "../../services/logger/logger";
@@ -7,14 +9,11 @@ import { ScreenProbeService } from "../../services/screen-probe/screen-probe-ser
 import { WindowManagerService } from "../../services/window-manager/window-manager-service";
 import { AutomationService } from "../../services/automation/automation-service";
 import { sleep } from "../../services/utils";
-import { ConversationAdapter } from "../conversation-adapter";
-
-interface HoverCopyResult {
-  text: string | null;
-  nextCandidateIndex: number;
-}
 
 export class CodexAdapter implements ConversationAdapter {
+  private lastSentToCodexRaw: string | null = null;
+  private lastForwardedCodexReplyHash: string | null = null;
+
   constructor(
     private readonly getConfig: () => BridgeConfig,
     private readonly windowManager: WindowManagerService,
@@ -26,17 +25,16 @@ export class CodexAdapter implements ConversationAdapter {
 
   async sendMessage(text: string, signal?: AbortSignal): Promise<void> {
     const config = this.getConfig();
-    const anchors = config.calibration.codex;
-    const responseRoi = this.resolveResponseRoi();
+    const inputAnchor = config.calibration.codex.inputAnchor;
 
-    if (!anchors.inputAnchor || !responseRoi) {
-      throw new Error("Codex calibration is incomplete");
+    if (!inputAnchor) {
+      throw new Error("Codex calibration is incomplete: missing inputAnchor");
     }
 
     await this.focusVSCodeWindow(signal);
     await this.ensureCodexPaneActive(signal);
 
-    await this.automation.leftClick(anchors.inputAnchor, signal);
+    await this.automation.leftClick(inputAnchor, signal);
     this.clipboard.setText(text);
     await this.automation.paste(signal);
 
@@ -48,7 +46,8 @@ export class CodexAdapter implements ConversationAdapter {
     await this.automation.pressEnter(signal);
     await sleep(config.timing.actionDelayMs, signal);
 
-    const inputRoi = this.rectAroundPoint(anchors.inputAnchor, 520, 60);
+    const responseRoi = await this.resolveResponseRoi(signal);
+    const inputRoi = await this.resolveFollowUpInputRoi(signal);
 
     const [inputCleared, timelineChanged, inputAreaChanged] = await Promise.all([
       this.probeInputCleared(signal),
@@ -74,24 +73,23 @@ export class CodexAdapter implements ConversationAdapter {
       timelineChanged,
       inputAreaChanged,
       passedSignals,
-      minRequired: anchors.minSendSignals
+      minRequired: config.calibration.codex.minSendSignals
     });
 
-    if (passedSignals < anchors.minSendSignals) {
+    if (passedSignals < config.calibration.codex.minSendSignals) {
       throw new Error(`Codex send validation failed: only ${passedSignals} signals`);
     }
+
+    this.lastSentToCodexRaw = text;
   }
 
   async waitForLatestResponseComplete(signal?: AbortSignal): Promise<void> {
     const config = this.getConfig();
-    const anchors = config.calibration.codex;
-    const responseRoi = this.resolveResponseRoi();
-
-    if (!responseRoi || !anchors.inputAnchor) {
-      throw new Error("Codex calibration is incomplete for wait stage");
-    }
+    const responseRoi = await this.resolveResponseRoi(signal);
+    const inputRoi = await this.resolveFollowUpInputRoi(signal);
 
     await this.focusVSCodeWindow(signal);
+    await this.ensureCodexPaneActive(signal);
 
     const stable = await this.screenProbe.waitForStability({
       roi: responseRoi,
@@ -107,7 +105,7 @@ export class CodexAdapter implements ConversationAdapter {
     }
 
     const inputReady = await this.screenProbe.waitForStability({
-      roi: this.rectAroundPoint(anchors.inputAnchor, 560, 64),
+      roi: inputRoi,
       timeoutMs: 10_000,
       stableWindowMs: Math.max(1000, Math.floor(config.timing.roiStabilityWindowMs / 2)),
       pollIntervalMs: config.timing.pollingIntervalMs,
@@ -131,113 +129,183 @@ export class CodexAdapter implements ConversationAdapter {
   }
 
   async copyLatestReply(signal?: AbortSignal): Promise<string> {
-    this.requireCopyCalibration();
-
     await this.focusVSCodeWindow(signal);
     await this.ensureCodexPaneActive(signal);
     await this.scrollToLatestResponse(signal);
 
-    let nextCandidateIndex = 0;
-    const primary = await this.runHoverCopyCycle(nextCandidateIndex, signal, 1);
-    if (primary.text) {
-      return primary.text;
+    const transcript = await this.copyFullTranscriptWithRetries(signal);
+    const parsed = this.parseLatestReply(transcript);
+    this.lastForwardedCodexReplyHash = this.clipboard.getHash(parsed.reply);
+    return parsed.reply;
+  }
+
+  async debugActivateBody(signal?: AbortSignal): Promise<void> {
+    await this.focusVSCodeWindow(signal);
+    await this.ensureCodexPaneActive(signal);
+    await this.exitInputFocus(signal);
+    await this.activateResponseBody(signal);
+  }
+
+  async debugSelectAll(signal?: AbortSignal): Promise<void> {
+    await this.debugActivateBody(signal);
+    await this.selectAllInTranscript(signal);
+  }
+
+  async debugCopyFullTranscript(signal?: AbortSignal): Promise<string> {
+    await this.focusVSCodeWindow(signal);
+    await this.ensureCodexPaneActive(signal);
+    await this.scrollToLatestResponse(signal);
+    return this.copyFullTranscriptWithRetries(signal);
+  }
+
+  async debugExtractLatest(promptOverride?: string, signal?: AbortSignal): Promise<{
+    reply: string;
+    strategy: string;
+    transcriptLength: number;
+  }> {
+    const prompt = promptOverride?.trim();
+    if (prompt) {
+      this.lastSentToCodexRaw = prompt;
     }
 
-    nextCandidateIndex = primary.nextCandidateIndex;
+    const transcript = await this.debugCopyFullTranscript(signal);
+    const parsed = this.parseLatestReply(transcript);
 
-    await this.ensureReplyAreaActiveIfNeeded(signal);
-    await this.scrollToLatestResponse(signal);
+    return {
+      reply: parsed.reply,
+      strategy: parsed.strategy,
+      transcriptLength: parsed.transcriptLength
+    };
+  }
 
-    const remainingCopyAttempts = Math.max(1, this.getConfig().retries.maxCopyAttempts - 1);
-    const fallback = await this.runHoverCopyCycle(nextCandidateIndex, signal, remainingCopyAttempts);
-    if (fallback.text) {
-      return fallback.text;
+  private async copyFullTranscriptWithRetries(signal?: AbortSignal): Promise<string> {
+    const config = this.getConfig();
+    const attempts = Math.max(1, config.retries.maxCopyAttempts);
+
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        await this.exitInputFocus(signal);
+        await this.activateResponseBody(signal);
+        return await this.copyFullTranscriptOnce(attempt, signal);
+      } catch (error) {
+        this.logger.warn("Codex full transcript copy attempt failed", {
+          attempt,
+          attempts,
+          error: String(error),
+          stepCode: error instanceof StepError ? error.code : null
+        });
+
+        if (attempt === attempts) {
+          throw error;
+        }
+
+        await this.scrollToLatestResponse(signal);
+      }
     }
 
     throw new StepError(
-      STEP_CODES.CODEX_CLIPBOARD_NOT_CHANGED,
-      "clipboard hash did not change after focus/activation/hover/copy fallback chain",
-      {
-        nextCandidateIndex: fallback.nextCandidateIndex
-      }
+      STEP_CODES.CODEX_COPY_FULL_TRANSCRIPT_FAILED,
+      "copy attempts exhausted without transcript"
     );
   }
 
-  async debugPaneActivation(signal?: AbortSignal): Promise<void> {
-    await this.focusVSCodeWindow(signal);
-    await this.ensureCodexPaneActive(signal);
-  }
+  private async copyFullTranscriptOnce(attempt: number, signal?: AbortSignal): Promise<string> {
+    const config = this.getConfig();
+    const beforeHash = this.seedClipboardProbe();
 
-  async debugHoverReveal(signal?: AbortSignal): Promise<void> {
-    this.requireCopyCalibration();
-    await this.focusVSCodeWindow(signal);
-    await this.ensureCodexPaneActive(signal);
-    const hoverPoints = this.resolveHoverPoints();
-    if (!hoverPoints.length) {
+    await this.selectAllInTranscript(signal);
+
+    try {
+      await this.automation.copy(signal);
+    } catch (error) {
       throw new StepError(
-        STEP_CODES.CODEX_HOVER_REVEAL_FAILED,
-        "no hover points configured"
+        STEP_CODES.CODEX_COPY_FULL_TRANSCRIPT_FAILED,
+        "command+c failed while copying full transcript",
+        {
+          attempt,
+          error: String(error)
+        }
       );
     }
 
-    await this.hoverRevealCopyBar(hoverPoints[0], 1, signal);
+    const result = await this.clipboard.waitForHashChangeWithin(beforeHash, {
+      timeoutMs: config.timing.clipboardVerifyTimeoutMs,
+      pollIntervalMs: config.timing.pollingIntervalMs,
+      requireNonEmpty: false,
+      signal
+    });
+
+    if (!result.changed) {
+      throw new StepError(
+        STEP_CODES.CODEX_COPY_FULL_TRANSCRIPT_FAILED,
+        "clipboard hash did not change after full transcript copy",
+        {
+          attempt
+        }
+      );
+    }
+
+    if (!result.text.trim()) {
+      throw new StepError(
+        STEP_CODES.CODEX_CLIPBOARD_EMPTY,
+        "clipboard is empty after full transcript copy",
+        {
+          attempt
+        }
+      );
+    }
+
+    this.logger.info("Codex full transcript copied", {
+      attempt,
+      length: result.text.length
+    });
+
+    return result.text;
   }
 
-  async debugCopyOnly(signal?: AbortSignal): Promise<string> {
-    return this.copyLatestReply(signal);
-  }
+  private parseLatestReply(transcript: string): {
+    reply: string;
+    strategy: string;
+    transcriptLength: number;
+  } {
+    try {
+      const config = this.getConfig();
+      const parsed = parseLatestCodexReply({
+        transcript,
+        lastSentToCodexRaw: this.lastSentToCodexRaw,
+        previousForwardedReplyHash: this.lastForwardedCodexReplyHash,
+        promptFingerprintChars: config.codex.promptFingerprintChars,
+        maxTranscriptChars: config.codex.maxTranscriptChars,
+        minExtractedReplyLength: config.codex.minExtractedReplyLength,
+        getHash: (value) => this.clipboard.getHash(value)
+      });
 
-  private async runHoverCopyCycle(
-    startCandidateIndex: number,
-    signal?: AbortSignal,
-    maxCopyAttemptsOverride?: number
-  ): Promise<HoverCopyResult> {
-    const config = this.getConfig();
-    const hoverPoints = this.resolveHoverPoints();
-    const copyPoints = this.resolveCopyCandidatePoints();
+      this.logger.info("Codex transcript extracted latest reply", {
+        strategy: parsed.strategy,
+        transcriptLength: parsed.transcriptLength,
+        replyLength: parsed.reply.length
+      });
 
-    if (!hoverPoints.length) {
-      throw new StepError(STEP_CODES.CODEX_HOVER_REVEAL_FAILED, "hover point list is empty");
-    }
-
-    if (!copyPoints.length) {
-      throw new StepError(STEP_CODES.CODEX_COPY_CLICK_FAILED, "copy candidate points are empty");
-    }
-
-    const maxHoverAttempts = Math.max(1, config.retries.maxHoverAttempts);
-    const maxCopyAttempts = Math.max(1, maxCopyAttemptsOverride ?? config.retries.maxCopyAttempts);
-    let candidateIndex = startCandidateIndex;
-
-    for (let hoverAttempt = 1; hoverAttempt <= maxHoverAttempts; hoverAttempt += 1) {
-      if (candidateIndex - startCandidateIndex >= maxCopyAttempts) {
-        break;
+      return parsed;
+    } catch (error) {
+      if (error instanceof StepError) {
+        throw error;
       }
 
-      const hoverPoint = hoverPoints[(hoverAttempt - 1) % hoverPoints.length];
-      await this.hoverRevealCopyBar(hoverPoint, hoverAttempt, signal);
-
-      const copyPoint = copyPoints[candidateIndex % copyPoints.length];
-      const copiedText = await this.clickCopyCandidateAndVerify(copyPoint, hoverAttempt, signal);
-      candidateIndex += 1;
-
-      if (copiedText) {
-        return {
-          text: copiedText,
-          nextCandidateIndex: candidateIndex
-        };
-      }
+      throw new StepError(
+        STEP_CODES.CODEX_TRANSCRIPT_PARSE_FAILED,
+        "unexpected error while parsing latest codex reply",
+        {
+          error: String(error)
+        }
+      );
     }
-
-    return {
-      text: null,
-      nextCandidateIndex: candidateIndex
-    };
   }
 
   private async focusVSCodeWindow(signal?: AbortSignal): Promise<void> {
     const config = this.getConfig();
-
     await this.windowManager.focusCodex(signal);
+
     const focused = await this.windowManager.verifyFrontmostApplication(config.windows.codexAppName, {
       attempts: config.retries.maxActivationAttempts,
       settleMs: config.timing.postActivationSettleMs,
@@ -254,234 +322,165 @@ export class CodexAdapter implements ConversationAdapter {
 
   private async ensureCodexPaneActive(signal?: AbortSignal): Promise<void> {
     const config = this.getConfig();
-    const point = config.calibration.codex.paneActivationPoint;
-
-    if (!point) {
-      throw new StepError(
-        STEP_CODES.CODEX_PANE_ACTIVATION_FAILED,
-        "paneActivationPoint is not calibrated"
-      );
-    }
 
     for (let attempt = 1; attempt <= Math.max(1, config.retries.maxActivationAttempts); attempt += 1) {
+      const point = await this.resolveBodyActivationPoint(signal);
       await this.automation.leftClick(point, signal);
       await sleep(config.timing.postActivationSettleMs, signal);
 
-      const focused = await this.windowManager.verifyFrontmostApplication(config.windows.codexAppName, {
+      const frontmost = await this.windowManager.verifyFrontmostApplication(config.windows.codexAppName, {
         attempts: 1,
         settleMs: config.timing.postActivationSettleMs,
         signal
       });
 
-      this.logger.info("Codex pane activation attempt", {
-        attempt,
-        point,
-        focused
-      });
-
-      if (focused) {
+      if (frontmost) {
+        this.logger.info("Codex pane activation succeeded", { attempt, point });
         return;
       }
     }
 
     throw new StepError(
-      STEP_CODES.CODEX_PANE_ACTIVATION_FAILED,
-      "pane activation attempts exhausted",
-      { point }
-    );
-  }
-
-  private async ensureReplyAreaActiveIfNeeded(signal?: AbortSignal): Promise<void> {
-    const config = this.getConfig();
-    const point = config.calibration.codex.replyAreaActivationPoint;
-
-    if (!point) {
-      throw new StepError(
-        STEP_CODES.CODEX_REPLY_AREA_ACTIVATION_FAILED,
-        "replyAreaActivationPoint is not calibrated"
-      );
-    }
-
-    for (let attempt = 1; attempt <= Math.max(1, config.retries.maxActivationAttempts); attempt += 1) {
-      await this.automation.leftClick(point, signal);
-      await sleep(config.timing.postActivationSettleMs, signal);
-
-      const focused = await this.windowManager.verifyFrontmostApplication(config.windows.codexAppName, {
-        attempts: 1,
-        settleMs: config.timing.postActivationSettleMs,
-        signal
-      });
-
-      this.logger.info("Codex reply area activation attempt", {
-        attempt,
-        point,
-        focused
-      });
-
-      if (focused) {
-        return;
-      }
-    }
-
-    throw new StepError(
-      STEP_CODES.CODEX_REPLY_AREA_ACTIVATION_FAILED,
-      "reply area activation attempts exhausted",
-      { point }
+      STEP_CODES.CODEX_BODY_ACTIVATION_FAILED,
+      "failed to activate Codex pane before transcript selection"
     );
   }
 
   private async scrollToLatestResponse(signal?: AbortSignal): Promise<void> {
     const config = this.getConfig();
-    const anchors = config.calibration.codex;
 
     try {
       await this.automation.scrollToBottom(signal);
-      if (anchors.bottomAnchor) {
-        await this.automation.leftClick(anchors.bottomAnchor, signal);
-      }
-
       await sleep(config.timing.postScrollSettleMs, signal);
 
-      if (anchors.bottomDetectionRoi) {
-        const stable = await this.screenProbe.waitForStability({
-          roi: anchors.bottomDetectionRoi,
-          timeoutMs: Math.min(10_000, config.timeout.copyMs),
-          stableWindowMs: Math.max(250, Math.floor(config.timing.postScrollSettleMs / 2)),
-          pollIntervalMs: config.timing.pollingIntervalMs,
-          maxDeltaRatio: config.screenProbe.roiPixelDiffThreshold,
-          signal
-        });
+      const responseRoi = await this.resolveResponseRoi(signal);
+      const stable = await this.screenProbe.waitForStability({
+        roi: responseRoi,
+        timeoutMs: Math.min(10_000, config.timeout.copyMs),
+        stableWindowMs: Math.max(300, Math.floor(config.timing.postScrollSettleMs / 2)),
+        pollIntervalMs: config.timing.pollingIntervalMs,
+        maxDeltaRatio: config.screenProbe.roiPixelDiffThreshold,
+        signal
+      });
 
-        if (!stable) {
-          throw new Error("bottom ROI did not stabilize after scroll");
-        }
+      if (!stable) {
+        throw new Error("response ROI did not stabilize after scroll");
       }
     } catch (error) {
       throw new StepError(
         STEP_CODES.CODEX_SCROLL_BOTTOM_FAILED,
-        "failed to scroll to latest response",
-        { error: String(error) }
-      );
-    }
-  }
-
-  private async hoverRevealCopyBar(point: Point, attempt: number, signal?: AbortSignal): Promise<void> {
-    const config = this.getConfig();
-
-    try {
-      const focused = await this.windowManager.verifyFrontmostApplication(config.windows.codexAppName, {
-        attempts: 1,
-        settleMs: config.timing.postActivationSettleMs,
-        signal
-      });
-
-      if (!focused) {
-        await this.focusVSCodeWindow(signal);
-        await this.ensureCodexPaneActive(signal);
-      }
-
-      await this.automation.hover(point, config.timing.hoverDwellMs, signal);
-      await sleep(config.timing.postHoverSettleMs, signal);
-
-      this.logger.info("Codex hover reveal", {
-        attempt,
-        point
-      });
-    } catch (error) {
-      throw new StepError(
-        STEP_CODES.CODEX_HOVER_REVEAL_FAILED,
-        "hover reveal failed",
+        "failed to scroll to latest Codex response",
         {
-          attempt,
-          point,
           error: String(error)
         }
       );
     }
   }
 
-  private async clickCopyCandidateAndVerify(
-    point: Point,
-    attempt: number,
-    signal?: AbortSignal
-  ): Promise<string | null> {
+  private async exitInputFocus(signal?: AbortSignal): Promise<void> {
+    await this.automation.pressEscape(signal);
+    await sleep(Math.max(60, Math.floor(this.getConfig().timing.actionDelayMs / 2)), signal);
+  }
+
+  private async activateResponseBody(signal?: AbortSignal): Promise<Point> {
     const config = this.getConfig();
-    const beforeHash = this.clipboard.getHash();
+    const point = await this.resolveBodyActivationPoint(signal);
 
     try {
       await this.automation.leftClick(point, signal);
+      await sleep(config.timing.postActivationSettleMs, signal);
+      this.logger.info("Codex response body activated", { point });
+      return point;
     } catch (error) {
       throw new StepError(
-        STEP_CODES.CODEX_COPY_CLICK_FAILED,
-        "copy candidate click failed",
+        STEP_CODES.CODEX_BODY_ACTIVATION_FAILED,
+        "failed to activate Codex response body",
         {
           point,
-          attempt,
           error: String(error)
         }
       );
     }
+  }
 
-    const result = await this.clipboard.waitForHashChangeWithin(beforeHash, {
-      timeoutMs: config.timing.clipboardVerifyTimeoutMs,
-      pollIntervalMs: config.timing.pollingIntervalMs,
-      requireNonEmpty: true,
-      signal
-    });
-
-    if (!result.changed || !result.text.trim()) {
-      this.logger.warn(STEP_CODES.CODEX_CLIPBOARD_NOT_CHANGED, {
-        attempt,
-        point,
-        beforeHash,
-        afterHash: result.hash
+  private async selectAllInTranscript(signal?: AbortSignal): Promise<void> {
+    try {
+      await this.automation.selectAll(signal);
+      await sleep(Math.max(60, Math.floor(this.getConfig().timing.actionDelayMs / 2)), signal);
+    } catch (error) {
+      throw new StepError(STEP_CODES.CODEX_SELECT_ALL_FAILED, "command+a failed", {
+        error: String(error)
       });
-      return null;
+    }
+  }
+
+  private seedClipboardProbe(): string {
+    const token = `[bridge-codex-transcript-${Date.now()}-${Math.random().toString(16).slice(2)}]`;
+    this.clipboard.setText(token);
+    return this.clipboard.getHash(token);
+  }
+
+  private async resolveBodyActivationPoint(signal?: AbortSignal): Promise<Point> {
+    const bounds = await this.resolveCodexWindowBounds(signal);
+    const ratio = this.getConfig().codex.responseBodyActivationRatio;
+
+    return {
+      x: Math.round(bounds.x + bounds.width * ratio.x),
+      y: Math.round(bounds.y + bounds.height * ratio.y)
+    };
+  }
+
+  private async resolveResponseRoi(signal?: AbortSignal): Promise<Rect> {
+    const codexCalibration = this.getConfig().calibration.codex;
+    if (codexCalibration.stableRoi) {
+      return clampRect(codexCalibration.stableRoi);
     }
 
-    this.logger.info("Codex copy succeeded", {
-      attempt,
-      point,
-      length: result.text.length
+    const bounds = await this.resolveCodexWindowBounds(signal);
+    const ratio = this.getConfig().codex.responseBodyRoiRatio;
+    return clampRect({
+      x: Math.round(bounds.x + bounds.width * ratio.x),
+      y: Math.round(bounds.y + bounds.height * ratio.y),
+      width: Math.round(bounds.width * ratio.width),
+      height: Math.round(bounds.height * ratio.height)
     });
-
-    return result.text;
   }
 
-  private resolveResponseRoi(): Rect | null {
-    const codex = this.getConfig().calibration.codex;
-    return codex.stableRoi ?? codex.responseRoi;
-  }
-
-  private resolveHoverPoints(): Point[] {
-    const codex = this.getConfig().calibration.codex;
-    if (!codex.hoverBandAnchor) {
-      return [];
+  private async resolveFollowUpInputRoi(signal?: AbortSignal): Promise<Rect> {
+    const inputAnchor = this.getConfig().calibration.codex.inputAnchor;
+    if (inputAnchor) {
+      return this.rectAroundPoint(inputAnchor, 560, 72);
     }
 
-    return codex.hoverOffsets.map((offset) => addPoint(codex.hoverBandAnchor as Point, offset));
+    const bounds = await this.resolveCodexWindowBounds(signal);
+    const ratio = this.getConfig().codex.followUpInputRoiRatio;
+    return clampRect({
+      x: Math.round(bounds.x + bounds.width * ratio.x),
+      y: Math.round(bounds.y + bounds.height * ratio.y),
+      width: Math.round(bounds.width * ratio.width),
+      height: Math.round(bounds.height * ratio.height)
+    });
   }
 
-  private resolveCopyCandidatePoints(): Point[] {
-    const points = this.getConfig().calibration.codex.copyCandidatePoints;
-    return points.filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
-  }
+  private async resolveCodexWindowBounds(signal?: AbortSignal): Promise<Rect> {
+    const config = this.getConfig();
+    const bounds = await this.windowManager.getFrontWindowBounds(config.windows.codexAppName);
 
-  private requireCopyCalibration(): void {
-    const codex = this.getConfig().calibration.codex;
-    const responseRoi = this.resolveResponseRoi();
-
-    if (
-      !codex.inputAnchor ||
-      !codex.paneActivationPoint ||
-      !codex.replyAreaActivationPoint ||
-      !codex.hoverBandAnchor ||
-      codex.copyCandidatePoints.length === 0 ||
-      !responseRoi ||
-      (!codex.bottomAnchor && !codex.bottomDetectionRoi)
-    ) {
-      throw new Error("Codex calibration is incomplete for focus-before-hover copy stage");
+    if (!bounds || bounds.width <= 0 || bounds.height <= 0) {
+      throw new StepError(
+        STEP_CODES.CODEX_BODY_ACTIVATION_FAILED,
+        "cannot resolve VSCode front window bounds for Codex activation",
+        {
+          bounds
+        }
+      );
     }
+
+    if (signal?.aborted) {
+      throw new Error("Aborted");
+    }
+
+    return bounds;
   }
 
   private async probeInputHasContent(signal?: AbortSignal): Promise<boolean> {
@@ -502,7 +501,7 @@ export class CodexAdapter implements ConversationAdapter {
     return content.trim().length === 0;
   }
 
-  private rectAroundPoint(point: { x: number; y: number }, width: number, height: number): Rect {
+  private rectAroundPoint(point: Point, width: number, height: number): Rect {
     return {
       x: Math.round(point.x - width / 2),
       y: Math.round(point.y - height / 2),

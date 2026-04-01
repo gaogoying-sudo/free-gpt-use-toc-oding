@@ -174,15 +174,23 @@ export class BridgeRuntime {
           console.log(`[diag] left-copy length=${text.length}`);
           break;
         }
-        case "right-pane-activation":
-          await this.codex.debugPaneActivation();
+        case "right-activate-body":
+          await this.codex.debugActivateBody();
           break;
-        case "right-hover-reveal":
-          await this.codex.debugHoverReveal();
+        case "right-select-all":
+          await this.codex.debugSelectAll();
           break;
-        case "right-copy": {
-          const text = await this.codex.debugCopyOnly();
-          console.log(`[diag] right-copy length=${text.length}`);
+        case "right-copy-full-transcript": {
+          const text = await this.codex.debugCopyFullTranscript();
+          console.log(`[diag] right-copy-full-transcript length=${text.length}`);
+          break;
+        }
+        case "right-extract-latest": {
+          const promptOverride = args.join(" ").trim() || undefined;
+          const result = await this.codex.debugExtractLatest(promptOverride);
+          console.log(
+            `[diag] right-extract-latest strategy=${result.strategy} transcriptLength=${result.transcriptLength} replyLength=${result.reply.length}`
+          );
           break;
         }
         case "round-gpt-to-codex":
@@ -295,7 +303,10 @@ export class BridgeRuntime {
     const payload = {
       status,
       left: this.config.calibration.chatgpt,
-      right: this.config.calibration.codex,
+      right: {
+        calibration: this.config.calibration.codex,
+        flow: this.config.codex
+      },
       tuning: {
         timing: this.config.timing,
         retries: this.config.retries,
@@ -398,9 +409,10 @@ export class BridgeRuntime {
       "  check-permissions",
       "  left-send <text>",
       "  left-copy",
-      "  right-pane-activation",
-      "  right-hover-reveal",
-      "  right-copy",
+      "  right-activate-body",
+      "  right-select-all",
+      "  right-copy-full-transcript",
+      "  right-extract-latest [prompt-override]",
       "  round-gpt-to-codex",
       "  round-codex-to-gpt"
     ];

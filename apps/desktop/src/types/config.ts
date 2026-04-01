@@ -50,15 +50,8 @@ export interface ChatGPTCalibration {
 export interface CodexCalibration {
   version: number;
   inputAnchor: Point | null;
-  paneActivationPoint: Point | null;
-  replyAreaActivationPoint: Point | null;
-  hoverBandAnchor: Point | null;
-  copyCandidatePoints: Point[];
   stableRoi: Rect | null;
   responseRoi: Rect | null;
-  bottomAnchor: Point | null;
-  bottomDetectionRoi: Rect | null;
-  hoverOffsets: Point[];
   minSendSignals: number;
 }
 
@@ -80,6 +73,27 @@ export interface ScreenProbeConfig {
   changeDeltaThreshold: number;
 }
 
+export interface RatioPoint {
+  x: number;
+  y: number;
+}
+
+export interface RatioRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface CodexFlowConfig {
+  responseBodyActivationRatio: RatioPoint;
+  responseBodyRoiRatio: RatioRect;
+  followUpInputRoiRatio: RatioRect;
+  promptFingerprintChars: number;
+  maxTranscriptChars: number;
+  minExtractedReplyLength: number;
+}
+
 export interface BridgeConfig {
   version: number;
   hotkeys: HotkeyConfig;
@@ -89,5 +103,6 @@ export interface BridgeConfig {
   debug: DebugConfig;
   windows: WindowManagerConfig;
   screenProbe: ScreenProbeConfig;
+  codex: CodexFlowConfig;
   calibration: CalibrationConfig;
 }

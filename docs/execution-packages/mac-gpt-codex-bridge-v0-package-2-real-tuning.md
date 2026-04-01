@@ -1,5 +1,7 @@
 # Mac GPT ↔ Codex Bridge V0 - Package 2 (Real Tuning)
 
+> Note: 右侧主抓取链路已在 Package 2B 调整为 `select-all-copy-extract`。本文件保留为历史记录。
+
 ## Scope
 
 本包聚焦：

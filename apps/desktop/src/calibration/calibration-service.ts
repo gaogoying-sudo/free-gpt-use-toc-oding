@@ -18,16 +18,7 @@ type CalibrationStepKey =
   | "chatgpt.scrollBottomAnchor"
   | "chatgpt.copySearchAnchor"
   | "chatgpt.latestReplyRoiAnchor"
-  | "codex.inputAnchor"
-  | "codex.paneActivationPoint"
-  | "codex.replyAreaActivationPoint"
-  | "codex.hoverBandAnchor"
-  | "codex.copyCandidatePoint1"
-  | "codex.copyCandidatePoint2"
-  | "codex.copyCandidatePoint3"
-  | "codex.stableRoiAnchor"
-  | "codex.bottomAnchor"
-  | "codex.bottomDetectionRoiAnchor";
+  | "codex.inputAnchor";
 
 interface CalibrationStep {
   key: CalibrationStepKey;
@@ -66,60 +57,14 @@ const LEFT_STEPS: CalibrationStep[] = [
 const RIGHT_STEPS: CalibrationStep[] = [
   {
     key: "codex.inputAnchor",
-    title: "右侧 1/10：Codex 输入框锚点",
-    detail: "把鼠标移动到右侧 Codex 输入框中心，然后点击 Capture。"
-  },
-  {
-    key: "codex.paneActivationPoint",
-    title: "右侧 2/10：Codex pane 激活点",
-    detail: "把鼠标移动到右侧 Codex 面板标题或可激活区域，然后点击 Capture。"
-  },
-  {
-    key: "codex.replyAreaActivationPoint",
-    title: "右侧 3/10：回复区激活点",
-    detail: "把鼠标移动到右侧最新回复正文区域（可点击激活）然后点击 Capture。"
-  },
-  {
-    key: "codex.hoverBandAnchor",
-    title: "右侧 4/10：hover 候选带锚点",
-    detail: "把鼠标移动到最新回复底部操作条大概中心，然后点击 Capture。"
-  },
-  {
-    key: "codex.copyCandidatePoint1",
-    title: "右侧 5/10：copy 候选点 #1",
-    detail: "把鼠标移动到 copy 可能出现位置 #1，然后点击 Capture。"
-  },
-  {
-    key: "codex.copyCandidatePoint2",
-    title: "右侧 6/10：copy 候选点 #2",
-    detail: "把鼠标移动到 copy 可能出现位置 #2，然后点击 Capture。"
-  },
-  {
-    key: "codex.copyCandidatePoint3",
-    title: "右侧 7/10：copy 候选点 #3",
-    detail: "把鼠标移动到 copy 可能出现位置 #3，然后点击 Capture。"
-  },
-  {
-    key: "codex.stableRoiAnchor",
-    title: "右侧 8/10：stable ROI 锚点",
-    detail: "把鼠标移动到右侧最新回复区域中间，然后点击 Capture。"
-  },
-  {
-    key: "codex.bottomAnchor",
-    title: "右侧 9/10：底部锚点",
-    detail: "把鼠标移动到右侧最底部回复附近可点击位置，然后点击 Capture。"
-  },
-  {
-    key: "codex.bottomDetectionRoiAnchor",
-    title: "右侧 10/10：bottom detection ROI 锚点",
-    detail: "把鼠标移动到右侧底部检测区域中间，然后点击 Capture。"
+    title: "右侧 1/1：Codex 输入框锚点",
+    detail:
+      "把鼠标移动到右侧 Codex follow-up 输入框中心，然后点击 Capture。其他右侧区域将由窗口比例自动推导。"
   }
 ];
 
 export class CalibrationService {
   private leftRoiAnchor: Point | null = null;
-  private rightStableRoiAnchor: Point | null = null;
-  private rightBottomRoiAnchor: Point | null = null;
 
   constructor(private readonly logger: Logger) {}
 
@@ -149,14 +94,6 @@ export class CalibrationService {
 
     const missingRight: string[] = [];
     if (!right.inputAnchor) missingRight.push("codex.inputAnchor");
-    if (!right.paneActivationPoint) missingRight.push("codex.paneActivationPoint");
-    if (!right.replyAreaActivationPoint) missingRight.push("codex.replyAreaActivationPoint");
-    if (!right.hoverBandAnchor) missingRight.push("codex.hoverBandAnchor");
-    if (!right.copyCandidatePoints.length) missingRight.push("codex.copyCandidatePoints");
-    if (!right.stableRoi) missingRight.push("codex.stableRoi");
-    if (!right.bottomAnchor && !right.bottomDetectionRoi) {
-      missingRight.push("codex.bottomAnchor|codex.bottomDetectionRoi");
-    }
 
     return {
       leftCalibrated: missingLeft.length === 0,
@@ -168,8 +105,6 @@ export class CalibrationService {
 
   async run(config: BridgeConfig, target: CalibrationTarget = "all"): Promise<BridgeConfig | null> {
     this.leftRoiAnchor = null;
-    this.rightStableRoiAnchor = null;
-    this.rightBottomRoiAnchor = null;
 
     const next = structuredClone(config);
     const steps = this.resolveSteps(target);
@@ -202,9 +137,9 @@ export class CalibrationService {
 
     this.deriveRois(next, target);
     next.calibration.leftVersion = 2;
-    next.calibration.rightVersion = 2;
+    next.calibration.rightVersion = 3;
     next.calibration.chatgpt.version = 2;
-    next.calibration.codex.version = 2;
+    next.calibration.codex.version = 3;
 
     const status = this.getStatus(next);
     next.calibration.calibrated = status.leftCalibrated && status.rightCalibrated;
@@ -256,44 +191,7 @@ export class CalibrationService {
       case "codex.inputAnchor":
         config.calibration.codex.inputAnchor = point;
         return;
-      case "codex.paneActivationPoint":
-        config.calibration.codex.paneActivationPoint = point;
-        return;
-      case "codex.replyAreaActivationPoint":
-        config.calibration.codex.replyAreaActivationPoint = point;
-        return;
-      case "codex.hoverBandAnchor":
-        config.calibration.codex.hoverBandAnchor = point;
-        return;
-      case "codex.copyCandidatePoint1":
-      case "codex.copyCandidatePoint2":
-      case "codex.copyCandidatePoint3":
-        this.assignCopyCandidatePoint(config, key, point);
-        return;
-      case "codex.stableRoiAnchor":
-        this.rightStableRoiAnchor = point;
-        return;
-      case "codex.bottomAnchor":
-        config.calibration.codex.bottomAnchor = point;
-        return;
-      case "codex.bottomDetectionRoiAnchor":
-        this.rightBottomRoiAnchor = point;
-        return;
     }
-  }
-
-  private assignCopyCandidatePoint(
-    config: BridgeConfig,
-    key: "codex.copyCandidatePoint1" | "codex.copyCandidatePoint2" | "codex.copyCandidatePoint3",
-    point: Point
-  ): void {
-    const index = key.endsWith("1") ? 0 : key.endsWith("2") ? 1 : 2;
-    const next = [...config.calibration.codex.copyCandidatePoints];
-    while (next.length < 3) {
-      next.push(point);
-    }
-    next[index] = point;
-    config.calibration.codex.copyCandidatePoints = next;
   }
 
   private deriveRois(config: BridgeConfig, target: CalibrationTarget): void {
@@ -311,26 +209,8 @@ export class CalibrationService {
     }
 
     if (target === "all" || target === "right") {
-      const stableAnchor = this.rightStableRoiAnchor ?? config.calibration.codex.hoverBandAnchor;
-      if (stableAnchor) {
-        config.calibration.codex.stableRoi = this.roiFromAnchor(stableAnchor, {
-          x: -560,
-          y: -320,
-          width: 1120,
-          height: 300
-        });
-        config.calibration.codex.responseRoi = config.calibration.codex.stableRoi;
-      }
-
-      const bottomAnchor = this.rightBottomRoiAnchor ?? config.calibration.codex.bottomAnchor;
-      if (bottomAnchor) {
-        config.calibration.codex.bottomDetectionRoi = this.roiFromAnchor(bottomAnchor, {
-          x: -280,
-          y: -60,
-          width: 560,
-          height: 120
-        });
-      }
+      // Right-side response ROI is now derived at runtime from VSCode bounds ratios.
+      // Keep existing stored ROI values untouched for compatibility.
     }
   }
 
