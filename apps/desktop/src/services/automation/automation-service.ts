@@ -97,6 +97,12 @@ export class AutomationService {
     await sleep(this.getConfig().timing.actionDelayMs, signal);
   }
 
+  async scrollToBottom(signal?: AbortSignal): Promise<void> {
+    throwIfAborted(signal);
+    await this.systemEvents("key code 125 using {command down}");
+    await sleep(this.getConfig().timing.actionDelayMs, signal);
+  }
+
   async pressEscape(signal?: AbortSignal): Promise<void> {
     throwIfAborted(signal);
     await this.systemEvents("key code 53");

@@ -1,5 +1,6 @@
 import { BridgeConfig } from "../../types/config";
 import { Rect, addPoint } from "../../types/geometry";
+import { STEP_CODES, StepError } from "../../types/step-codes";
 import { ClipboardService } from "../../services/clipboard/clipboard-service";
 import { Logger } from "../../services/logger/logger";
 import { ScreenProbeService } from "../../services/screen-probe/screen-probe-service";
@@ -21,7 +22,9 @@ export class ChatGPTAdapter implements ConversationAdapter {
   async sendMessage(text: string, signal?: AbortSignal): Promise<void> {
     const config = this.getConfig();
     const anchors = config.calibration.chatgpt;
-    if (!anchors.inputAnchor || !anchors.sendButtonAnchor || !anchors.responseRoi) {
+    const responseRoi = anchors.latestReplyStableRoi ?? anchors.responseRoi;
+
+    if (!anchors.inputAnchor || !anchors.sendButtonAnchor || !responseRoi) {
       throw new Error("ChatGPT calibration is incomplete");
     }
 
@@ -32,7 +35,10 @@ export class ChatGPTAdapter implements ConversationAdapter {
 
     const hasInput = await this.probeInputHasContent(signal);
     if (!hasInput) {
-      throw new Error("ChatGPT input validation failed: pasted content is empty");
+      throw new StepError(
+        STEP_CODES.CHATGPT_SEND_NOT_CONFIRMED,
+        "input validation failed: pasted content is empty"
+      );
     }
 
     await this.automation.leftClick(anchors.sendButtonAnchor, signal);
@@ -50,7 +56,7 @@ export class ChatGPTAdapter implements ConversationAdapter {
         signal
       }),
       this.screenProbe.detectChange({
-        roi: anchors.responseRoi,
+        roi: responseRoi,
         timeoutMs: 8_000,
         pollIntervalMs: config.timing.pollingIntervalMs,
         minDeltaRatio: config.screenProbe.changeDeltaThreshold,
@@ -68,80 +74,100 @@ export class ChatGPTAdapter implements ConversationAdapter {
     });
 
     if (passedSignals < anchors.minSendSignals) {
-      throw new Error(`ChatGPT send validation failed: only ${passedSignals} signals`);
+      throw new StepError(
+        STEP_CODES.CHATGPT_SEND_NOT_CONFIRMED,
+        `only ${passedSignals} send confirmation signals passed`,
+        {
+          inputCleared,
+          buttonChanged,
+          timelineChanged,
+          passedSignals,
+          minRequired: anchors.minSendSignals
+        }
+      );
     }
   }
 
   async waitForLatestResponseComplete(signal?: AbortSignal): Promise<void> {
     const config = this.getConfig();
     const anchors = config.calibration.chatgpt;
-    if (!anchors.responseRoi || !anchors.sendButtonAnchor || !anchors.copySearchAnchor) {
+    const responseRoi = anchors.latestReplyStableRoi ?? anchors.responseRoi;
+
+    if (!responseRoi || !anchors.sendButtonAnchor || !anchors.copySearchAnchor) {
       throw new Error("ChatGPT calibration is incomplete for wait stage");
     }
 
     await this.windowManager.focusChatGPT(signal);
 
     const stable = await this.screenProbe.waitForStability({
-      roi: anchors.responseRoi,
+      roi: responseRoi,
       timeoutMs: config.timeout.waitForCompletionMs,
-      stableWindowMs: config.timing.stabilityWindowMs,
+      stableWindowMs: config.timing.roiStabilityWindowMs,
       pollIntervalMs: config.timing.pollingIntervalMs,
-      maxDeltaRatio: config.screenProbe.stableDeltaThreshold,
+      maxDeltaRatio: config.screenProbe.roiPixelDiffThreshold,
       signal
     });
 
     if (!stable) {
-      throw new Error("ChatGPT response did not stabilize in time");
+      throw new StepError(
+        STEP_CODES.CHATGPT_OUTPUT_NOT_STABLE,
+        "response ROI did not stabilize in time"
+      );
     }
 
     const sendButtonIdle = await this.screenProbe.waitForStability({
       roi: this.rectAroundPoint(anchors.sendButtonAnchor, 42, 34),
       timeoutMs: 12_000,
-      stableWindowMs: Math.max(1000, Math.floor(config.timing.stabilityWindowMs / 2)),
+      stableWindowMs: Math.max(1000, Math.floor(config.timing.roiStabilityWindowMs / 2)),
       pollIntervalMs: config.timing.pollingIntervalMs,
-      maxDeltaRatio: config.screenProbe.stableDeltaThreshold,
+      maxDeltaRatio: config.screenProbe.roiPixelDiffThreshold,
       signal
     });
 
     const copyBandStable = await this.screenProbe.waitForStability({
       roi: this.rectAroundPoint(anchors.copySearchAnchor, 180, 44),
       timeoutMs: 12_000,
-      stableWindowMs: Math.max(1000, Math.floor(config.timing.stabilityWindowMs / 2)),
+      stableWindowMs: Math.max(1000, Math.floor(config.timing.roiStabilityWindowMs / 2)),
       pollIntervalMs: config.timing.pollingIntervalMs,
-      maxDeltaRatio: config.screenProbe.stableDeltaThreshold,
+      maxDeltaRatio: config.screenProbe.roiPixelDiffThreshold,
       signal
     });
 
     const passedSignals = [stable, sendButtonIdle, copyBandStable].filter(Boolean).length;
     if (passedSignals < 2) {
-      throw new Error(`ChatGPT completion validation failed: ${passedSignals} signals`);
+      throw new StepError(
+        STEP_CODES.CHATGPT_OUTPUT_NOT_STABLE,
+        `completion validation failed: ${passedSignals} signals`
+      );
     }
   }
 
   async copyLatestReply(signal?: AbortSignal): Promise<string> {
     const config = this.getConfig();
     const anchors = config.calibration.chatgpt;
+
     if (!anchors.scrollBottomAnchor || !anchors.copySearchAnchor) {
       throw new Error("ChatGPT calibration is incomplete for copy stage");
     }
 
     await this.windowManager.focusChatGPT(signal);
     await this.automation.leftClick(anchors.scrollBottomAnchor, signal);
-    await sleep(config.timing.actionDelayMs, signal);
+    await sleep(config.timing.postScrollSettleMs, signal);
 
     const beforeHash = this.clipboard.getHash();
 
-    for (let attempt = 1; attempt <= config.retries.copy; attempt += 1) {
+    for (let attempt = 1; attempt <= config.retries.maxCopyAttempts; attempt += 1) {
       this.logger.info("ChatGPT copy attempt", { attempt });
 
       for (const offset of anchors.copyCandidateOffsets) {
         const point = addPoint(anchors.copySearchAnchor, offset);
         await this.automation.hover(point, config.timing.hoverDwellMs, signal);
+        await sleep(config.timing.postHoverSettleMs, signal);
         await this.automation.leftClick(point, signal);
 
-        const result = await this.clipboard.waitForHashChange(beforeHash, {
-          retries: 1,
-          delayMs: config.timing.copyCheckDelayMs,
+        const result = await this.clipboard.waitForHashChangeWithin(beforeHash, {
+          timeoutMs: config.timing.clipboardVerifyTimeoutMs,
+          pollIntervalMs: config.timing.pollingIntervalMs,
           requireNonEmpty: true,
           signal
         });
@@ -156,9 +182,9 @@ export class ChatGPTAdapter implements ConversationAdapter {
       }
 
       await this.automation.copy(signal);
-      const fallback = await this.clipboard.waitForHashChange(beforeHash, {
-        retries: 1,
-        delayMs: config.timing.copyCheckDelayMs,
+      const fallback = await this.clipboard.waitForHashChangeWithin(beforeHash, {
+        timeoutMs: config.timing.clipboardVerifyTimeoutMs,
+        pollIntervalMs: config.timing.pollingIntervalMs,
         requireNonEmpty: true,
         signal
       });
@@ -171,7 +197,15 @@ export class ChatGPTAdapter implements ConversationAdapter {
       }
     }
 
-    throw new Error("ChatGPT copy failed after max retries");
+    throw new StepError(STEP_CODES.CHATGPT_COPY_FAILED, "copy failed after max retries");
+  }
+
+  async debugSendOnly(text: string, signal?: AbortSignal): Promise<void> {
+    await this.sendMessage(text, signal);
+  }
+
+  async debugCopyOnly(signal?: AbortSignal): Promise<string> {
+    return this.copyLatestReply(signal);
   }
 
   private async probeInputHasContent(signal?: AbortSignal): Promise<boolean> {

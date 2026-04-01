@@ -6,8 +6,9 @@
   "main": "dist/main/index.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "start": "npm run build && electron .",
-    "dev": "npm run build && electron .",
+    "start": "npm run build && env -u ELECTRON_RUN_AS_NODE electron .",
+    "dev": "npm run build && env -u ELECTRON_RUN_AS_NODE electron .",
+    "diag": "npm run build && env -u ELECTRON_RUN_AS_NODE electron . --diag",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

@@ -7,17 +7,21 @@ export interface HotkeyConfig {
 }
 
 export interface RetryConfig {
-  copy: number;
   send: number;
-  hover: number;
+  maxHoverAttempts: number;
+  maxCopyAttempts: number;
+  maxActivationAttempts: number;
 }
 
 export interface TimingConfig {
   pollingIntervalMs: number;
-  stabilityWindowMs: number;
   actionDelayMs: number;
   hoverDwellMs: number;
-  copyCheckDelayMs: number;
+  postActivationSettleMs: number;
+  postScrollSettleMs: number;
+  postHoverSettleMs: number;
+  clipboardVerifyTimeoutMs: number;
+  roiStabilityWindowMs: number;
 }
 
 export interface TimeoutConfig {
@@ -32,27 +36,36 @@ export interface DebugConfig {
 }
 
 export interface ChatGPTCalibration {
+  version: number;
   inputAnchor: Point | null;
   sendButtonAnchor: Point | null;
   scrollBottomAnchor: Point | null;
   copySearchAnchor: Point | null;
+  latestReplyStableRoi: Rect | null;
   responseRoi: Rect | null;
   copyCandidateOffsets: Point[];
   minSendSignals: number;
 }
 
 export interface CodexCalibration {
+  version: number;
   inputAnchor: Point | null;
+  paneActivationPoint: Point | null;
+  replyAreaActivationPoint: Point | null;
   hoverBandAnchor: Point | null;
-  copyCandidateAnchor: Point | null;
+  copyCandidatePoints: Point[];
+  stableRoi: Rect | null;
   responseRoi: Rect | null;
+  bottomAnchor: Point | null;
+  bottomDetectionRoi: Rect | null;
   hoverOffsets: Point[];
-  copyCandidateOffsets: Point[];
   minSendSignals: number;
 }
 
 export interface CalibrationConfig {
   calibrated: boolean;
+  leftVersion: number;
+  rightVersion: number;
   chatgpt: ChatGPTCalibration;
   codex: CodexCalibration;
 }
@@ -63,7 +76,7 @@ export interface WindowManagerConfig {
 }
 
 export interface ScreenProbeConfig {
-  stableDeltaThreshold: number;
+  roiPixelDiffThreshold: number;
   changeDeltaThreshold: number;
 }
 

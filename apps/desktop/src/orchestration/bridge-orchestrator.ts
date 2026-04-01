@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { BridgeConfig } from "../types/config";
+import { getStepCode } from "../types/step-codes";
 import { BridgeState, StateChange } from "../types/state";
 import { ConversationAdapter } from "../adapters/conversation-adapter";
 import { ClipboardService } from "../services/clipboard/clipboard-service";
@@ -62,7 +63,10 @@ export class BridgeOrchestrator extends EventEmitter {
           return;
         }
 
-        this.logger.error("orchestration loop failed", { error: String(error) });
+        this.logger.error("orchestration loop failed", {
+          error: String(error),
+          stepCode: getStepCode(error)
+        });
         this.transitionTo(BridgeState.ERROR, String(error));
       })
       .finally(() => {
@@ -200,7 +204,8 @@ export class BridgeOrchestrator extends EventEmitter {
           action,
           attempt,
           attempts,
-          error: String(error)
+          error: String(error),
+          stepCode: getStepCode(error)
         });
 
         if (attempt === attempts) {

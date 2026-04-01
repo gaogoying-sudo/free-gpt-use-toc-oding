@@ -6,6 +6,8 @@ export interface TrayHandlers {
   onStop: () => void;
   onSingleRound: () => void;
   onRecalibrate: () => void;
+  onRecalibrateRight: () => void;
+  onPrintCalibrationStatus: () => void;
 }
 
 interface TrayOptions {
@@ -58,6 +60,14 @@ export class TrayManager {
       {
         label: "Recalibrate",
         click: this.handlers.onRecalibrate
+      },
+      {
+        label: "Recalibrate Right (Codex)",
+        click: this.handlers.onRecalibrateRight
+      },
+      {
+        label: "Print Calibration Status",
+        click: this.handlers.onPrintCalibrationStatus
       },
       {
         type: "separator"
